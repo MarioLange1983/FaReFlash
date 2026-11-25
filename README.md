@@ -1,2 +1,258 @@
-# FaReFlash
-Firmware for Fantic ESP32-C3 BLE/CAN Gateway Modules
+# << COMING SOON >>
+
+## FaReFlash — Firmware for Fantic ESP32-C3 BLE/CAN Gateway Modules
+
+![Target](https://img.shields.io/badge/Target-ESP32--C3%20%28RISC--V%29-blue.svg)
+![Bus](https://img.shields.io/badge/CAN--Bus-500%20kbit%2Fs%20ISO%2015765--2-orange.svg)
+![Tested](https://img.shields.io/badge/Tested%20on-OEM%20V1.1%20only-yellow.svg)
+![Status](https://img.shields.io/badge/Status-Hobby%20Project%20%2F%20Alpha-red.svg)
+
+**FaReFlash** is a personal hobby project providing an independent, clean-room replacement firmware binary (`.bin`) for the ESP32-C3-based Bluetooth/CAN gateway module (*e-Conn Micro Fantic*, Part No. `30513` / `V1391005`) used in Fantic motorcycles.
+
+It maintains full protocol compatibility with existing BLE service `0xE550` apps (such as [Fantic Analyzer](https://github.com/MarioLange1983/FanticAnalyzer)) while unlocking the unused hardware capabilities of the ESP32-C3 — including a local Wi-Fi diagnostic cockpit, live CAN bus monitoring with an interactive Bit-Finder, extended OBD-II live telemetry, BLE fault-code clearing, and Over-The-Air (OTA) updates.
+
+> [!IMPORTANT]
+> **Hobby Project & Independence Notice:**
+> * This is a **non-commercial hobby project**, provided **"AS IS"** with **no warranty** — **use entirely at your own risk!**
+> * FaReFlash is **not affiliated with, endorsed by, or supported by Fantic Motor S.p.A. or e-Shock S.r.l.**
+> * **Firmware Compatibility Warning:** FaReFlash has so far **only been tested on modules running stock OEM firmware `V1.1`**. Newer modules shipped with **`V2.03`** (16-bit protocol) have **not been tested** and may use different security/bootloader protections — flashing on `V2.03` is currently unverified and needs further investigation.
+
+---
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/8497d268-0993-4dc9-afd0-a388717b68c1" width="450">
+  <img src="https://github.com/user-attachments/assets/d30a1a1c-ff7b-4298-8dd4-30f350d91528" width="450">
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/3a38c65b-e654-4e93-8428-bae7b852f7c7" width="450">
+  <img src="https://github.com/user-attachments/assets/8a25562f-bd11-4c6d-bf18-5a3b28b508b9" width="450">
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/f416e0a7-020d-438d-a6b7-d3c6ed7c8896" width="450">
+  <img src="https://github.com/user-attachments/assets/1ac108e5-833a-4780-a4df-33fc358b8126" width="450">
+</p>
+
+---
+
+## Table of Contents
+
+- [Why FaReFlash? (Comparison & Advantages)](#why-fareflash-comparison--advantages)
+- [Key Features](#key-features)
+- [Supported Hardware & Vehicle Profiles](#supported-hardware--vehicle-profiles)
+- [How to Install FaReFlash on Your Module](#how-to-install-fareflash-on-your-module)
+  - [Important Warning: Sealed Module & One-Way Risk](#important-warning-sealed-module--one-way-risk)
+  - [Initial Installation via CAN-Bus](#initial-installation-via-can-bus)
+  - [Updating an Existing FaReFlash Installation (Web-OTA)](#updating-an-existing-fareflash-installation-web-ota)
+  - [Returning to Stock Firmware](#returning-to-stock-firmware)
+- [First Boot & Web Cockpit](#first-boot--web-cockpit)
+- [Risks, Limitations & Safety Warnings](#risks-limitations--safety-warnings)
+- [FaReFlash Custom BLE DIDs (`0xEE00` Namespace)](#fareflash-custom-ble-dids-0xee00-namespace)
+- [Disclaimer & Regulatory Compliance](#disclaimer--regulatory-compliance)
+- [Contact](#-contact)
+
+---
+
+## Why FaReFlash? (Comparison & Advantages)
+
+The OEM gateway hardware is built around an **Espressif ESP32-C3-MINI-1** (160 MHz RISC-V, 400 KB SRAM, 4 MB Flash, Wi-Fi + BLE 5.0) paired with a **TI TCAN1146** Selective-Wake CAN transceiver. On stock firmware, several of these hardware capabilities remain unused.
+
+| Feature / Capability | Stock OEM Firmware (`V1.1`) | FaReFlash (Clean-Room) |
+| :--- | :---: | :---: |
+| **BLE Telemetry Service (`0xE550`)** | ✅ Supported | ✅ 100% compatible |
+| **Clear ECU Fault Codes (DTCs) via BLE (`0x14`)** | ❌ Not supported (CAN only) | ✅ Supported via BLE & Web UI |
+| **Profile 1 (`XMF`/`XEF 125`) Gear, Load & Odometer** | ⚠️ Partial (`0xFF` / `0xFFFFFFFF`) | ✅ Fully populated |
+| **OBD-II Mode `0x01` Live Sensors (MAP, IAT, Timing)** | ❌ Not supported | ✅ Polled & streamed (`0xEE20`–`0xEE24`) |
+| **Gateway Health & Chip Temperature Monitoring** | ❌ CAN heartbeat only | ✅ Exposed via BLE (`0xEE11`) & Web UI |
+| **Built-in Wi-Fi SoftAP & Browser Cockpit** | ❌ Wi-Fi unused | ✅ Local Web UI (`192.168.4.1` / `fareflash.local`) |
+| **Live CAN Monitor, Trace & Interactive Bit-Finder** | ❌ Not available | ✅ Built into Web UI (`.csv` / `.log` export) |
+| **End-User OTA Updates (Web)** | ❌ CAN-bus only | ✅ Web-OTA via browser |
+| **ISO-TP / UDS Bounds Checking** | ⚠️ Limited FF length validation | ✅ Strict length & bounds checks |
+| **Selective-Wake Power-Off** | ✅ Supported | ✅ Supported + active-BLE sleep guard |
+| **NVS Backup & Restore (`nvs_es`)** | ❌ Not available | ✅ 1-click download/restore in Web UI |
+
+---
+
+## Key Features
+
+### 1. Full Protocol & App Compatibility
+* Implements the complete BLE GATT service `0xE550` (`0xE5C0`–`0xE5C4`), standard CRC-8 OpenSafety framing, standard CRC-16/MODBUS-based Security Access (`0x27`), Live Telemetry Stream (`0xE5C3`), and Diagnostic/DTC Stream (`0xE5C4`).
+* Works out-of-the-box with **Fantic Analyzer** (which automatically detects FaReFlash, displays the yellow lightning indicator in the top bar, and enables DTC clearing, Gateway Health, and extended OBD-II live data).
+* Preserves your module's existing serial number, calibration data, and vehicle profile stored in `nvs_es`.
+
+### 2. Built-in Wi-Fi Diagnostic Cockpit (DE / EN / FR / ES)
+* Accessible via any smartphone or laptop browser at **`http://192.168.4.1`** or **`http://fareflash.local`** (built-in mDNS responder).
+* **Dashboard Tab:** Live RPM, Speedo/Tacho (`km/h`), Gear, Throttle (`%`), Engine Load (`%`), Coolant Temp (`°C`), Battery Voltage (`V`), Odometer, Sidestand, plus OBD-II MAP (`kPa`), IAT (`°C`), and Ignition Timing (`° BTDC`).
+* **Diagnostics Tab:** Live view of both Motorcycle ECU DTCs and internal Gateway DTCs, with 1-click fault memory reset.
+* **CAN Monitor & Interactive `🔍 Bit-Finder` Tab:**
+  * **Matrix Mode:** Real-time per-ID view with byte-change highlighting and cycle time (`Δt ms`).
+  * **Trace Mode:** Chronological raw CAN frame log (up to 50,000 frames in browser memory) with ID filtering (`310, 500, 780-7DF, !6F0`) and export to SavvyCAN `.csv` or `candump .log`.
+  * **Interactive `🔍 Bit-Finder` (SavvyCAN-style):** Runs 100% in your browser (zero extra load on the module). Click **Baseline (3s)** hands-off to automatically mask noisy bits (alive counters, CRCs, RPM jitter), then operate any lever or switch (clutch, brake, gear, turn signal) to highlight the exact changing byte and bit (`0→1` green, `1→0` red, toggled yellow) in real time.
+* **Firmware & Config Tabs:** Dual-slot Web-OTA updater with binary header validation, NVS backup/restore, vehicle profile selection, Wi-Fi SSID/password customization, and an option to disable the Wi-Fi SoftAP when you only need Bluetooth.
+
+### 3. Hardened CAN/ISO-TP Stack & Smart Power Management
+* Strict ISO 15765-2 length and bounds checking prevents memory corruption or unexpected reboots on malformed bus traffic.
+* Proper ISO 14229-1 functional NRC suppression on `0x7DF` so external OBD-II testers never conflict with the gateway.
+* Automatic power-off after ignition off (CAN silence), while automatically keeping the module awake if a BLE client is actively connected.
+
+---
+
+## Supported Hardware & Vehicle Profiles
+
+### Hardware
+* **Module:** `e-Conn Micro Fantic` (Part No. `30513` / `V1391005`), Hardware RevC (`CUM`), 4-pin JST connector (`+12V`, `GND`, `CAN_H`, `CAN_L`).
+* **Stock Firmware Requirement:** **Verified on `V1.1` only.** Modules with **`V2.03`** are untested and may be protected (needs investigation).
+
+### Vehicle Profiles (`DID 0x0001` / `0xFD03`)
+
+| Profile ID | VIN Prefix | Motorcycle Platform | Wakeup CAN ID |
+| :---: | :--- | :--- | :---: |
+| **`1`** (`0x0001`) | `ZFMFA13...` | Fantic XMF 125 / XEF 125 | `0x310` |
+| **`4`** (`0x0004`) | `ZFMCA50...` | Fantic Caballero 500 (Scrambler, Deluxe, Rally, Flat Track, Explorer) | `0x260` |
+| **`5`** (`0x0005`) | `ZFMCA13...` / `ZFMCA14...` | Fantic Caballero 125 (MY24 / MY25) | `0x260` |
+| **`6`** (`0x0006`) | — | Reserved Combustion Profile (same CAN layout as 4/5) | `0x260` |
+| **`11` / `12`** | `ZFMEM01...` / `ZFMEM02...` | Fantic Electric / Issimo Platform | `0x2F2` |
+
+*(Note: Motorcycles with integrated Bluetooth in their TFT dashboard — such as the Caballero 700 — do **not** use this external gateway module.)*
+
+---
+
+## How to Install FaReFlash on Your Module
+
+### Important Warning: Sealed Module & One-Way Risk
+
+> [!CAUTION]
+> **No Full Flash Backup Possible — Potential One-Way Operation:**
+> The OEM module is permanently sealed in epoxy resin. There is **no external USB/UART port** and **no way to create a full flash backup** of the stock firmware before flashing.
+>
+> Initial installation on a sealed OEM module is **only possible over the CAN bus** using `fantic_can_flasher.py`. Although CAN-OTA writes into the `ota_0`/`ota_1` partition (leaving `factory` and `nvs_es` untouched), **if anything goes wrong during flashing or if the module fails to boot, there is no non-destructive recovery path.** Proceed only if you accept that flashing a sealed module can be a **one-way ticket**.
+
+---
+
+### Initial Installation via CAN-Bus
+
+The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x780 -> 0x785` (500 kbit/s), which writes the FaReFlash `.bin` directly into the inactive OTA partition (`ota_0` / `ota_1`).
+
+#### Required Hardware
+* A Linux PC with a SocketCAN USB-to-CAN adapter — tested and recommended: **DSD TECH SH-C31A USB-to-CAN Adapter** (`gs_usb` driver built into Linux, integrated switchable `120 Ω` bus termination).
+* **Connection Option A (Strongly Recommended — In-Vehicle via 6-Pin OBD, No Module Removal):**
+  * Connect directly to the motorcycle's **red 6-pin Euro 5 / Euro 5+ OBD diagnostic connector (ISO 19689)** using a simple 6-pin motorcycle OBD adapter (`CAN_H`, `CAN_L`, `GND`). Because the gateway module sits on the same 500 kbit/s CAN bus as the diagnostic port, **you do not need to remove the module from the bike** — and because the motorcycle's ECUs keep the CAN bus continuously active, **in-vehicle flashing is significantly more reliable and straightforward than bench flashing**.
+  * Turn **Ignition ON, Engine OFF** (ensure a healthy battery ≥ 12.2 V or connect a battery charger; disconnect any BLE apps or other OBD scanners).
+  * Set the **`120 Ω` termination switch on the DSD TECH SH-C31A to `OFF`** (the motorcycle wiring harness is already terminated).
+* **Connection Option B (Bench / Removed Module — Advanced / Less Reliable):**
+  * Connect a stable 12 V power supply and CAN lines directly to the module's 4-pin JST connector (`+12V`, `GND`, `CAN_H`, `CAN_L`).
+  * Set the **`120 Ω` termination switch on the DSD TECH SH-C31A to `ON`**.
+  * *Note on bench stability:* Without the motorcycle wiring harness (active ECU traffic), waking a sleeping module is noticeably more sensitive and may occasionally abort mid-transfer (requiring a retry). Whenever possible, **prefer Option A (in-vehicle via the 6-pin OBD port)**. If you must flash on the bench, **power-cycle 12 V and start the flasher within the first 10 seconds** so the module never enters sleep mode in the first place (otherwise, the script will attempt to wake it automatically via a 3-frame burst on `0x260`/`0x310`/`0x2F2` and send keep-alive frames).
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/5822c907-7a25-43bc-8c9e-75c827f0d3d1" alt="JST 04R-JWPF-VSLE cable harness" width="250">
+</p>
+
+#### Steps
+1. Bring up the SocketCAN interface at **500 kbit/s**:
+   ```bash
+   sudo ip link set can0 down
+   sudo ip link set can0 up type can bitrate 500000
+   ```
+2. *(Recommended first)* Run a **non-destructive pre-flight check** to verify your connection, wake the module if needed, and inspect its firmware version & profile without modifying flash:
+   ```bash
+   python3 fantic_can_flasher.py --iface can0 --check-only
+   ```
+3. Run the Python CAN flasher with the pre-built FaReFlash `.bin` file:
+   ```bash
+   python3 fantic_can_flasher.py --iface can0 --file FaReFlash_v.0.0.50-alpha.bin
+   ```
+4. **Automated Safe Flash Workflow:** The script automatically handles every step:
+   * **Bus & Wakeup Detection:** Passively checks whether the module is connected to a live motorcycle harness (with active ECU wakeup PIDs such as `0x260`/`0x310`/`0x2F2`). On a bench setup without ECU traffic, it automatically starts a background wakeup/keep-alive sender so the module stays awake throughout the entire flash.
+   * **Module Info & Pre-Flight Verification:** Displays Firmware Version (`0xF194`/`0xF195`), Serial Number (`0xF18C`), HW Revision (`0xF193`), Vehicle Profile (`0xFD03`), Active Partition (`0xFD0B`), Gateway DTC count, and EOL backup status, verifies that flashing can be started safely (automatically blocking untested `V2.03` modules unless `--force` is explicitly passed), and asks for explicit confirmation before touching flash.
+   * **Backup & Flash:** Validates the `.bin` file (`<= 1 MB`, ESP32-C3 header, XOR checksum & appended SHA-256 digest), backs up Serial (`0xF18C`), HW-Rev (`0xF193`), and EOL (`0xFD00`), clears pre-flash DTCs (`0x14 FF FF FF`), enters Programming Session (`0x10 0x02`), unlocks Security Access, erases the OTA slot (`0x31 0x01 0xFD00`, with automatic recovery reset if a stale OTA state exists), transfers the firmware via ISO-TP (`0x34` / `0x36` / `0x37`), validates the image (`0x31 0x01 0xFD02`), and reboots (`0x11 0x01`).
+   * **Post-Flash Verification:** Waits for reboot completion, confirms that the active boot partition (`0xFD0B`) switched to the newly flashed slot (detecting silent boot rollbacks), displays the running firmware version, verifies that Serial Number & HW Revision are intact (**safely restoring them via `0x2E 0xFD00` only if altered and a valid 159-byte EOL backup exists**), and clears post-flash DTCs.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/9df1adb9-1cd9-4d6c-803c-506a5e8c7072" width="450">
+</p>
+
+---
+
+### Updating an Existing FaReFlash Installation (Web-OTA)
+
+Once FaReFlash is installed on the module, future updates require **no CAN adapter or cables** and take ~10 seconds directly from your browser:
+
+1. Connect your smartphone or laptop to the module's Wi-Fi (`FaReFlash-<SERIAL>`).
+2. Open **`http://192.168.4.1`** → **`🚀 Firmware`** tab.
+3. Select the new `FaReFlash_<version>.bin` file, keep Target set to **Standard: Next free update slot**, and click **Install Firmware**.
+4. The module validates the image header before erasing, writes the inactive OTA slot, and reboots automatically.
+
+---
+
+### Returning to Stock Firmware
+
+Because initial CAN-bus flashing writes to `ota_0`/`ota_1`, your original OEM `V1.1` firmware remains stored in the `factory` partition. As long as FaReFlash boots and the Web Cockpit is reachable, you can switch the active boot partition back to **`factory (1)`** in the **`ℹ️ Module Info`** tab.
+
+> [!CAUTION]
+> **Never select "Overwrite Factory memory" in Web-OTA on a sealed OEM module** — overwriting the `factory` partition permanently destroys your stock fallback with no way to restore it.
+
+---
+
+## First Boot & Web Cockpit
+
+1. Power on the motorcycle ignition (or 12 V bench supply).
+2. **Bluetooth:** The module continues advertising as `FanticCON-<SERIAL>` (unchanged, so existing BLE pairings continue working).
+3. **Wi-Fi SoftAP:**
+   * **SSID:** `FaReFlash-<SERIAL>` (e.g., `FaReFlash-154204`)
+   * **Default Password:** `fantic<SERIAL>` (WPA2-PSK, e.g., `fantic154204`)
+   * **URL:** `http://192.168.4.1` or `http://fareflash.local`
+4. **Recommended first step:** Open the **`ℹ️ Module Info`** tab and click **`💾 NVS Backup`** to download a copy of your module's serial number and calibration data.
+5. **Security & Power Tip:** Change the default Wi-Fi password in **`⚙️ Config`**, or disable the Wi-Fi SoftAP in **`⚙️ Config`** if you only use Bluetooth telemetry.
+
+---
+
+## Risks, Limitations & Safety Warnings
+
+> [!CAUTION]
+> **Read carefully before flashing any vehicle electronics.**
+
+1. **No Backup / Potential One-Way Operation:**
+   * Sealed OEM modules cannot be backed up via UART/JTAG beforehand. A power loss, unstable CAN connection, or overwriting the `factory` partition can permanently brick the module with no non-destructive recovery path.
+2. **Untested on Stock `V2.03` Modules:**
+   * Only stock `V1.1` modules have been tested. Flashing `V2.03` modules is untested and may fail or behave unexpectedly.
+3. **Power Consumption (Wi-Fi SoftAP):**
+   * The Wi-Fi SoftAP draws more current than BLE alone while the ignition is on. If you only need Bluetooth telemetry, you can disable the Wi-Fi SoftAP in **`⚙️ Config`**.
+4. **CAN-Bus Integrity:**
+   * The module is connected to the motorcycle's primary 500 kbit/s CAN bus (shared with Engine ECU, Dashboard, and ABS). Experimental third-party firmware can never be guaranteed 100% bug-free — never flash or run experimental tests while riding.
+5. **Rider Distraction:**
+   * **Never interact with the Web Cockpit, Bit-Finder, or OTA uploader while operating a motorcycle.** Perform all diagnostic and configuration tasks only while safely parked.
+6. **Warranty & Road Legality:**
+   * Installing third-party firmware on an OEM electronic module **will void the manufacturer's warranty** for that component (and potentially related electrical claims). Depending on your jurisdiction (e.g., EU Whole Vehicle Type-Approval / German StVZO), modifying vehicle-connected electronics may affect road legality. You are solely responsible for compliance with local laws and regulations.
+
+---
+
+## FaReFlash Custom BLE DIDs (`0xEE00` Namespace)
+
+All standard OEM DIDs (`0x0001`–`0x002C`, `0xE501`–`0xE506`) remain unchanged. FaReFlash adds an optional, backwards-compatible extension namespace:
+
+| DID | Size | Access | Description |
+| :--- | :---: | :---: | :--- |
+| **`0xEE01`** | Variable | Read (`0x22`) | FaReFlash Identity & Version string |
+| **`0xEE10`** | Variable | Read (`0x22`) | Wi-Fi SoftAP status & active SSID |
+| **`0xEE11`** | 37 B | Read (`0x22`) / Clear (`0x31 0x01 0xEE11`) | Gateway Health: Chip Temp (`0.1 °C`), Peak Temp (`0.1 °C`), Temp Status, 6 × 5-byte internal NVS DTC slots |
+| **`0xEE20`** | 2 B | Read / Stream (`0xE5C3`) | OBD-II Mode `0x01` Valid-PID Bitmask |
+| **`0xEE21`** | 1 B | Read / Stream (`0xE5C3`) | OBD-II Manifold Absolute Pressure (MAP, `kPa`) |
+| **`0xEE22`** | 1 B | Read / Stream (`0xE5C3`) | OBD-II Vehicle Speed (`km/h`) |
+| **`0xEE23`** | 1 B | Read / Stream (`0xE5C3`) | OBD-II Intake Air Temperature (IAT, signed `°C`) |
+| **`0xEE24`** | 2 B | Read / Stream (`0xE5C3`) | OBD-II Ignition Timing Advance (signed `0.1 ° BTDC`) |
+
+---
+
+## Disclaimer & Regulatory Compliance
+
+* **Hobby Project / No Warranty ("AS-IS"):** This firmware binary and documentation are a private hobby project provided **"AS IS"**, without warranty of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, and non-infringement. In no event shall the author or contributors be liable for any claim, damages, bricked hardware, vehicle malfunction, or other liability arising from its use.
+* **AI-Assisted Development:** Artificial Intelligence (AI) tools were used during the development of this project to assist with protocol analysis, firmware implementation, tooling, and documentation.
+* **Clean-Room & Interoperability Statement:** This firmware was developed independently from scratch based exclusively on externally observable bus and BLE protocol behavior on lawfully owned hardware (interoperability research under EU Directive 2009/24/EC Art. 6, German § 69e UrhG, and § 3 Abs. 1 Nr. 2 GeschGehG). No vendor trade secrets, proprietary firmware binaries, or copyrighted vendor files are included or distributed.
+* **Trademarks:** *Fantic*, *Caballero*, *XMF*, *XEF*, *Issimo*, and *e-Shock* are registered trademarks of their respective owners and are referenced solely for compatibility identification.
+
+---
+
+## 📬 Contact
+
+If you want to get in touch, please open an issue in this repository and leave your email address. I will get back to you!
