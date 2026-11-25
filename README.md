@@ -19,18 +19,18 @@ It maintains full protocol compatibility with existing BLE service `0xE550` apps
 
 ---
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/8497d268-0993-4dc9-afd0-a388717b68c1" width="450">
-  <img src="https://github.com/user-attachments/assets/d30a1a1c-ff7b-4298-8dd4-30f350d91528" width="450">
+  <img src="https://github.com/user-attachments/assets/e5bb1de6-05cd-4654-b886-b868ae6d2e18" width="450">
+  <img src="https://github.com/user-attachments/assets/e413e117-32c1-4aa7-b965-77e166b8ab7d" width="450">
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/3a38c65b-e654-4e93-8428-bae7b852f7c7" width="450">
-  <img src="https://github.com/user-attachments/assets/8a25562f-bd11-4c6d-bf18-5a3b28b508b9" width="450">
+  <img src="https://github.com/user-attachments/assets/194614de-f811-41b7-bf7d-eba55bda9368" width="450">
+  <img src="https://github.com/user-attachments/assets/906c0d80-632f-4998-a0ac-75c39e1ab211" width="450">
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/f416e0a7-020d-438d-a6b7-d3c6ed7c8896" width="450">
-  <img src="https://github.com/user-attachments/assets/1ac108e5-833a-4780-a4df-33fc358b8126" width="450">
+  <img src="https://github.com/user-attachments/assets/141ef37c-ea3e-4d5f-a5dc-3f183fc37f55" width="450">
+  <img src="https://github.com/user-attachments/assets/2889a4c7-240d-4ad5-9c6b-6b5420a28e54" width="450">
 </p>
 
 ---
@@ -145,7 +145,7 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
   * *Note on bench stability:* Without the motorcycle wiring harness (active ECU traffic), waking a sleeping module is noticeably more sensitive and may occasionally abort mid-transfer (requiring a retry). Whenever possible, **prefer Option A (in-vehicle via the 6-pin OBD port)**. If you must flash on the bench, **power-cycle 12 V and start the flasher within the first 10 seconds** so the module never enters sleep mode in the first place (otherwise, the script will attempt to wake it automatically via a 3-frame burst on `0x260`/`0x310`/`0x2F2` and send keep-alive frames).
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/5822c907-7a25-43bc-8c9e-75c827f0d3d1" alt="JST 04R-JWPF-VSLE cable harness" width="250">
+  <img src="https://github.com/user-attachments/assets/a7676a32-dd5b-4c50-aec4-c6c49e5fd8bf" alt="JST 04R-JWPF-VSLE cable harness" width="250">
 </p>
 
 #### Steps
@@ -169,7 +169,7 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
    * **Post-Flash Verification:** Waits for reboot completion, confirms that the active boot partition (`0xFD0B`) switched to the newly flashed slot (detecting silent boot rollbacks), displays the running firmware version, verifies that Serial Number & HW Revision are intact (**safely restoring them via `0x2E 0xFD00` only if altered and a valid 159-byte EOL backup exists**), and clears post-flash DTCs.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/9df1adb9-1cd9-4d6c-803c-506a5e8c7072" width="450">
+  <img src="https://github.com/user-attachments/assets/643d4e7f-850d-45da-b0b6-d6988632b816" width="450">
 </p>
 
 ---
