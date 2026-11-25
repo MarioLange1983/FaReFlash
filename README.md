@@ -19,18 +19,18 @@ It maintains full protocol compatibility with existing BLE service `0xE550` apps
 
 ---
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/e5bb1de6-05cd-4654-b886-b868ae6d2e18" width="450">
-  <img src="https://github.com/user-attachments/assets/e413e117-32c1-4aa7-b965-77e166b8ab7d" width="450">
-</p>
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/194614de-f811-41b7-bf7d-eba55bda9368" width="450">
-  <img src="https://github.com/user-attachments/assets/906c0d80-632f-4998-a0ac-75c39e1ab211" width="450">
-</p>
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/141ef37c-ea3e-4d5f-a5dc-3f183fc37f55" width="450">
   <img src="https://github.com/user-attachments/assets/2889a4c7-240d-4ad5-9c6b-6b5420a28e54" width="450">
+  <img src="https://github.com/user-attachments/assets/141ef37c-ea3e-4d5f-a5dc-3f183fc37f55" width="450">
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/906c0d80-632f-4998-a0ac-75c39e1ab211" width="450">
+  <img src="https://github.com/user-attachments/assets/194614de-f811-41b7-bf7d-eba55bda9368" width="450">
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e413e117-32c1-4aa7-b965-77e166b8ab7d" width="450">
+  <img src="https://github.com/user-attachments/assets/e5bb1de6-05cd-4654-b886-b868ae6d2e18" width="450">
 </p>
 
 ---
