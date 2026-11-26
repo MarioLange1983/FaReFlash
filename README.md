@@ -145,7 +145,8 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
   * *Note on bench stability:* Without the motorcycle wiring harness (active ECU traffic), waking a sleeping module is noticeably more sensitive and may occasionally abort mid-transfer (requiring a retry). Whenever possible, **prefer Option A (in-vehicle via the 6-pin OBD port)**. If you must flash on the bench, **power-cycle 12 V and start the flasher within the first 10 seconds** so the module never enters sleep mode in the first place (otherwise, the script will attempt to wake it automatically via a 3-frame burst on `0x260`/`0x310`/`0x2F2` and send keep-alive frames).
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/a7676a32-dd5b-4c50-aec4-c6c49e5fd8bf" alt="JST 04R-JWPF-VSLE cable harness" width="250">
+  <img src="https://github.com/user-attachments/assets/7741d89c-71eb-499a-b15b-91a4f59c0c4c" alt="JST 04R-JWPF-VSLE cable harness" width="250">
+  <img src="https://github.com/user-attachments/assets/1e9f823f-3e8e-4eb1-bab5-6fd89ecaaa8a" alt="EURO5 to SH-C31A cable harness" width="250">
 </p>
 
 #### Steps
@@ -169,7 +170,7 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
    * **Post-Flash Verification:** Waits for reboot completion, confirms that the active boot partition (`0xFD0B`) switched to the newly flashed slot (detecting silent boot rollbacks), displays the running firmware version, verifies that Serial Number & HW Revision are intact (**safely restoring them via `0x2E 0xFD00` only if altered and a valid 159-byte EOL backup exists**), and clears post-flash DTCs.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/643d4e7f-850d-45da-b0b6-d6988632b816" width="450">
+  <img src="https://github.com/user-attachments/assets/1ae132b6-d3c7-4ee0-a47e-661a47cc5221" width="450">
 </p>
 
 ---
