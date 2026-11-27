@@ -26,6 +26,7 @@ import argparse
 import errno
 import hashlib
 import os
+import select
 import sys
 import time
 import struct
@@ -63,6 +64,8 @@ PARTITION_NAMES = {
 POLY_LEVEL1 = 0x35564443
 POLY_LEVEL2 = 0xE5ACAAE5
 DEFAULT_BLOCK_SIZE = 128
+MIN_FLASH_VOLTAGE_V = 12.0
+MAX_FLASH_VOLTAGE_V = 15.5
 MAX_PARTITION_SIZE = 1048576  # 1 MB (factory / ota_0 / ota_1)
 
 
@@ -303,6 +306,22 @@ class CanFlasher:
         self.sock.settimeout(0.1)
         self.ack_error_seen = False
         self.bus_off_seen = False
+        # Filter RX in the Linux kernel to Gateway frames (0x785 + 0x6F0) by default so
+        # high-rate in-vehicle bus traffic (~1000 fps) cannot stall UDS/drain() or overflow RX.
+        self.set_gateway_rx_filter(True)
+
+    def set_gateway_rx_filter(self, enable: bool = True):
+        """Restrict SocketCAN RX in kernel space to 0x785 (UDS Resp) and 0x6F0 (Heartbeat)."""
+        try:
+            if enable:
+                # Match exact 11-bit standard data frames (EFF=0, RTR=0)
+                mask = 0xC00007FF  # CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_SFF_MASK
+                flt = struct.pack("=IIII", CAN_ID_RESP, mask, CAN_ID_HEARTBEAT, mask)
+            else:
+                flt = struct.pack("=II", 0, 0)
+            self.sock.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_FILTER, flt)
+        except OSError:
+            pass
 
     def close(self):
         try:
@@ -361,24 +380,30 @@ class CanFlasher:
         """Passively listen on the CAN bus to detect vehicle harness traffic & wakeup PIDs."""
         seen_counts: dict[int, int] = {}
         last_hb: bytes | None = None
+        self.set_gateway_rx_filter(False)
+        self.drain()
         deadline = time.monotonic() + duration
-        while time.monotonic() < deadline:
-            try:
-                raw_frame = self.sock.recv(16)
-                if len(raw_frame) < 16:
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    raw_frame = self.sock.recv(16)
+                    if len(raw_frame) < 16:
+                        continue
+                    raw_can_id, can_dlc = struct.unpack("=IB3x", raw_frame[:8])
+                    if self._check_error_frame(raw_can_id):
+                        continue
+                    if raw_can_id & 0xC0000000:  # Ignore EFF (29-bit) & RTR frames
+                        continue
+                    can_id = raw_can_id & 0x7FF
+                    seen_counts[can_id] = seen_counts.get(can_id, 0) + 1
+                    if can_id == CAN_ID_HEARTBEAT:
+                        dlc = min(can_dlc, 8)
+                        last_hb = raw_frame[8 : 8 + dlc]
+                except socket.timeout:
                     continue
-                raw_can_id, can_dlc = struct.unpack("=IB3x", raw_frame[:8])
-                if self._check_error_frame(raw_can_id):
-                    continue
-                if raw_can_id & 0xC0000000:  # Ignore EFF (29-bit) & RTR frames
-                    continue
-                can_id = raw_can_id & 0x7FF
-                seen_counts[can_id] = seen_counts.get(can_id, 0) + 1
-                if can_id == CAN_ID_HEARTBEAT:
-                    dlc = min(can_dlc, 8)
-                    last_hb = raw_frame[8 : 8 + dlc]
-            except socket.timeout:
-                continue
+        finally:
+            self.set_gateway_rx_filter(True)
+            self.drain()
 
         wakeup_found = [wid for wid in WAKEUP_IDS if wid in seen_counts]
         other_ecu_ids = [
@@ -393,16 +418,20 @@ class CanFlasher:
             "in_vehicle": bool(wakeup_found) or len(other_ecu_ids) >= 2,
         }
 
-    def drain(self):
-        old_timeout = self.sock.gettimeout()
-        self.sock.settimeout(0.01)
-        try:
-            while True:
-                self.sock.recv(16)
-        except (socket.timeout, BlockingIOError):
-            pass
-        finally:
-            self.sock.settimeout(old_timeout)
+    def drain(self, max_frames: int = 4096):
+        """Truly non-blocking drain of pending RX frames (avoids CPython settimeout() select wait)."""
+        for _ in range(max_frames):
+            r, _, _ = select.select([self.sock], [], [], 0.0)
+            if not r:
+                break
+            try:
+                self.sock.recv(16, socket.MSG_DONTWAIT)
+            except (BlockingIOError, socket.timeout):
+                break
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    break
+                break
 
     def _wait_flow_control(self, timeout: float = 1.5) -> tuple[int, float]:
         """Wait for ISO-TP Flow Control (0x30 CTS) and return (block_size, st_min_sec)."""
@@ -604,22 +633,32 @@ class CanFlasher:
         return self.recv_frame(CAN_ID_HEARTBEAT, timeout=timeout)
 
 
-def parse_heartbeat(hb: bytes, is_fareflash: bool = False) -> str:
+def extract_heartbeat_ubatt_v(hb: bytes | None) -> float | None:
+    """Decode Gateway ADC1_CH0 supply voltage from 0x6F0 Bytes 2..3 (12-bit, 5 mV/LSB)."""
+    if not hb or len(hb) < 5 or (hb[3] & 0x0F) != 0:
+        return None
+    ubatt_12 = (hb[2] << 4) | ((hb[3] >> 4) & 0x0F)
+    return ubatt_12 * 0.005
+
+
+def parse_heartbeat(hb: bytes) -> str:
     if len(hb) < 5:
         return f"Raw: {hb.hex()}"
     alive = (hb[0] >> 4) & 0x0F
     err_flags = (hb[0] >> 2) & 0x03
     model_id = hb[1]
-    temp_str = f"{hb[3] - 40}°C" if hb[3] != 0 else "n/a"
-    if is_fareflash:
-        partition_id = (hb[2] >> 6) & 0x03
-        ble_conn = bool((hb[2] >> 4) & 0x01)
-        part_name = PARTITION_NAMES.get(partition_id, str(partition_id))
-        return (
-            f"Partition: {part_name}, Model: {model_id}, Temp: {temp_str}, "
-            f"BLE: {'Connected' if ble_conn else 'Idle'}, Faults: 0x{err_flags:X}, Alive: {alive}"
-        )
-    return f"Model: {model_id}, Temp: {temp_str}, Faults: 0x{err_flags:X}, Alive: {alive}"
+    ubatt_12 = (hb[2] << 4) | ((hb[3] >> 4) & 0x0F)
+    ubatt_v = ubatt_12 * 0.005
+    vin_state = (hb[4] >> 4) & 0x0F
+    ble_detail = hb[4] & 0x0F
+    vin_map = {0: "Wait", 1: "OK", 2: "Mismatch"}
+    ble_map = {0: "Off(Cal)", 1: "Off", 2: "Connected", 3: "Streaming", 4: "Ready", 5: "Idle/Standby"}
+    vin_str = vin_map.get(vin_state, str(vin_state))
+    ble_str = ble_map.get(ble_detail, str(ble_detail))
+    return (
+        f"Model: {model_id}, Ubatt: {ubatt_v:.2f}V, BLE: {ble_str}, "
+        f"VIN: {vin_str}, Faults: 0x{err_flags:X}, Alive: {alive}"
+    )
 
 
 def read_module_info(flasher: CanFlasher, hb: bytes | None) -> dict:
@@ -744,7 +783,7 @@ def print_preflight_summary(
 
     uds_str = C.ok("OK (responding)") if mod_info["uds_ok"] else C.err("NO RESPONSE")
     print(f"  UDS 0x780->0x785  : {uds_str}")
-    hb_str = parse_heartbeat(mod_info["heartbeat"], is_fareflash=is_fareflash) if mod_info["heartbeat"] else C.warn("NOT SEEN")
+    hb_str = parse_heartbeat(mod_info["heartbeat"]) if mod_info["heartbeat"] else C.warn("NOT SEEN")
     print(f"  Heartbeat (0x6F0) : {hb_str}")
     print(f"  Firmware Version  : {C.BOLD}{fw_display}{C.RESET}")
     print(f"  Build/Prog Date   : {mod_info['prog_date'] or '<n/a>'}")
@@ -787,9 +826,36 @@ def print_preflight_summary(
         print(f"   {C.err('[FAIL]')} Gateway does NOT respond on UDS 0x780 -> 0x785")
         blockers.append("Gateway not reachable over CAN UDS (check wiring, 12V power, 500 kbit/s, 120 Ohm termination).")
 
+    low_voltage = False
+    ubatt_v = extract_heartbeat_ubatt_v(mod_info["heartbeat"])
+
     if mod_info["heartbeat"]:
         print(f"   {C.ok('[OK]')}   Gateway 0x6F0 heartbeat active")
-        if is_fareflash and len(mod_info["heartbeat"]) >= 3 and bool((mod_info["heartbeat"][2] >> 4) & 0x01):
+        if ubatt_v is not None:
+            if ubatt_v < MIN_FLASH_VOLTAGE_V:
+                low_voltage = True
+                if ubatt_v < 5.0:
+                    print(
+                        f"   {C.err('[FAIL]')} Gateway supply voltage too low ({ubatt_v:.2f} V < {MIN_FLASH_VOLTAGE_V:.1f} V — "
+                        "bare dev-board without GPIO0 divider? Use --force)"
+                    )
+                else:
+                    print(
+                        f"   {C.err('[FAIL]')} Gateway supply voltage too low ({ubatt_v:.2f} V < {MIN_FLASH_VOLTAGE_V:.1f} V — "
+                        "connect a 12V battery charger! Use --force to override)"
+                    )
+                warnings.append(f"Gateway supply voltage too low ({ubatt_v:.2f} V < {MIN_FLASH_VOLTAGE_V:.1f} V).")
+            elif ubatt_v > MAX_FLASH_VOLTAGE_V:
+                print(
+                    f"   {C.warn('[WARN]')} Gateway supply voltage high ({ubatt_v:.2f} V > {MAX_FLASH_VOLTAGE_V:.1f} V — "
+                    "check power supply!)"
+                )
+                warnings.append(f"Gateway supply voltage high ({ubatt_v:.2f} V).")
+            else:
+                print(f"   {C.ok('[OK]')}   Gateway supply voltage OK ({ubatt_v:.2f} V >= {MIN_FLASH_VOLTAGE_V:.1f} V)")
+        else:
+            print(f"   {C.warn('[WARN]')} Could not decode 0x6F0 ADC Ubatt — verify >= 12.0V power manually")
+        if len(mod_info["heartbeat"]) >= 5 and (mod_info["heartbeat"][4] & 0x0F) in (2, 3):
             print(f"   {C.warn('[WARN]')} A BLE app is currently connected — disconnect BLE before CAN flashing!")
             warnings.append("BLE client connected during CAN flash.")
     else:
@@ -831,6 +897,8 @@ def print_preflight_summary(
         print(f"\n  {C.err('STATUS: NOT SAFE TO FLASH!')}")
         for b in blockers:
             print(f"   {C.err('-> BLOCKER:')} {b}")
+    elif low_voltage:
+        print(f"\n  {C.err(f'STATUS: LOW SUPPLY VOLTAGE ({ubatt_v:.2f} V < {MIN_FLASH_VOLTAGE_V:.1f} V) — BLOCKED UNLESS --force IS SET!')}")
     elif is_v203:
         print(f"\n  {C.err('STATUS: UNTESTED V2.03 MODULE — BLOCKED UNLESS --force IS SET!')}")
     elif warnings:
@@ -839,7 +907,7 @@ def print_preflight_summary(
         print(f"\n  {C.ok('STATUS: ALL CHECKS PASSED — SAFE TO START FLASH!')}")
 
     print(sep_eq)
-    return (len(blockers) == 0), warnings, is_v203
+    return (len(blockers) == 0), warnings, is_v203, low_voltage, ubatt_v
 
 
 def flash_firmware(
@@ -958,7 +1026,7 @@ def flash_firmware(
             active_wake_ids = [exact_wid]
             keeper.set_wake_ids(active_wake_ids)
 
-        safe_to_flash, _warnings, is_v203 = print_preflight_summary(
+        safe_to_flash, _warnings, is_v203, low_voltage, ubatt_v = print_preflight_summary(
             img_info=img_info,
             bus_info=bus_info,
             mod_info=mod_info,
@@ -967,10 +1035,18 @@ def flash_firmware(
         )
 
         if check_only:
-            sys.exit(0 if safe_to_flash else 1)
+            sys.exit(0 if (safe_to_flash and not low_voltage) else 1)
 
         if not safe_to_flash:
             print(f"\n{C.err('Aborting:')} Pre-flight check failed. Module flash was NOT modified.")
+            sys.exit(1)
+
+        if low_voltage and not force_unsupported:
+            print(
+                f"\n{C.err('Aborting:')} Gateway supply voltage ({ubatt_v:.2f} V) is below {MIN_FLASH_VOLTAGE_V:.1f} V.\n"
+                "          Connect a 12V battery charger before flashing to prevent a bricked ECU.\n"
+                "          Module flash was NOT modified. Pass --force only on a USB dev-board or if you accept the risk."
+            )
             sys.exit(1)
 
         if is_v203 and not force_unsupported:
@@ -980,12 +1056,13 @@ def flash_firmware(
             )
             sys.exit(1)
 
-        if not assume_yes or is_v203:
-            prompt = (
-                f"\n{C.err('[DANGER: UNTESTED V2.03]')} Really proceed with flashing? [y/N]: "
-                if is_v203
-                else f"\n{C.warn('Start flashing now?')} Ensure stable 12V power! [y/N]: "
-            )
+        if not assume_yes or is_v203 or low_voltage:
+            if is_v203:
+                prompt = f"\n{C.err('[DANGER: UNTESTED V2.03]')} Really proceed with flashing? [y/N]: "
+            elif low_voltage:
+                prompt = f"\n{C.err(f'[DANGER: LOW VOLTAGE {ubatt_v:.2f} V]')} Really proceed with flashing? [y/N]: "
+            else:
+                prompt = f"\n{C.warn('Start flashing now?')} Ensure stable 12V power! [y/N]: "
             answer = input(prompt).strip().lower()
             if answer not in ("y", "yes"):
                 print(C.warn("Aborted by user. Module flash was NOT modified."))
@@ -1148,7 +1225,7 @@ def flash_firmware(
         print(f" Booted Partition (0xFD0B): {C.BOLD}{active_part_str}{C.RESET}")
         print(f" Running Firmware:          {C.CYAN}{C.BOLD}{post_fw_str}{C.RESET}")
         if hb:
-            print(f" Heartbeat (0x6F0):         {parse_heartbeat(hb, is_fareflash=post_is_fareflash)}")
+            print(f" Heartbeat (0x6F0):         {parse_heartbeat(hb)}")
 
         partition_rollback = (
             pre_partition_id is not None and post_part_id is not None and post_part_id == pre_partition_id
@@ -1243,37 +1320,102 @@ def flash_firmware(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fantic e-Shock CAN UDS Firmware Flasher")
-    parser.add_argument("image", nargs="?", help="Path to FaReFlash .bin firmware file")
-    parser.add_argument("--file", "-f", dest="file_opt", help="Path to FaReFlash .bin firmware file")
-    parser.add_argument("--iface", "-i", default=CAN_INTERFACE, help="SocketCAN interface (default: can0)")
-    parser.add_argument(
+    examples = """Examples:
+  1. Safe Pre-Flight Check (read module info, Ubatt, Serial & EOL without flashing):
+       python3 fantic_can_flasher.py --info
+
+  2. Flash FaReFlash firmware over CAN (interactive confirmation, >= 12.0V required):
+       python3 fantic_can_flasher.py FaReFlash_v.0.0.54-alpha.bin
+
+  3. Control FaReFlash Wi-Fi SoftAP via CAN (without smartphone):
+       python3 fantic_can_flasher.py --wifi-mode on        # On-Demand (10-min auto-off)
+       python3 fantic_can_flasher.py --wifi-mode off       # Turn SoftAP off
+       python3 fantic_can_flasher.py --wifi-mode persist   # Keep ON across reboots (bench)
+
+  4. Bench / Advanced options:
+       python3 fantic_can_flasher.py --iface can0 --wake-id 0x260 FaReFlash.bin
+       python3 fantic_can_flasher.py --force FaReFlash.bin # Override <12V (USB dev-board) or V2.03
+"""
+
+    parser = argparse.ArgumentParser(
+        prog="fantic_can_flasher.py",
+        usage="%(prog)s [OPTIONS] [FIRMWARE.bin]",
+        description="Fantic e-Shock / FaReFlash CAN-Bus UDS Firmware Flasher & Service Tool (500 kbit/s)",
+        epilog=examples,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    grp_act = parser.add_argument_group("Firmware & Actions")
+    grp_act.add_argument("image", nargs="?", metavar="FIRMWARE.bin", help="Path to FaReFlash .bin firmware file")
+    grp_act.add_argument("-f", "--file", dest="file_opt", metavar="PATH", help="Alternative flag for the .bin file")
+    grp_act.add_argument(
         "--check-only",
+        "--info",
+        dest="check_only",
         action="store_true",
-        help="Only check CAN bus, wake module if needed, and display all module infos without flashing",
+        help="Read module info, 0x6F0 Ubatt, partition & EOL backup without flashing",
     )
-    parser.add_argument("--yes", "-y", action="store_true", help="Skip interactive confirmation prompt")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Allow flashing on untested firmware versions (e.g. stock V2.03) — use at your own risk",
+    grp_act.add_argument(
+        "--wifi-mode",
+        choices=("off", "on", "persist"),
+        default=None,
+        help="Control FaReFlash Wi-Fi SoftAP via CAN 0xFD0E (off, on=10m on-demand, persist)",
     )
-    parser.add_argument(
+
+    grp_can = parser.add_argument_group("CAN Bus & Wakeup")
+    grp_can.add_argument("-i", "--iface", default=CAN_INTERFACE, help="SocketCAN interface (default: can0)")
+    grp_can.add_argument(
         "--wake-id",
         type=lambda x: int(x, 0),
         default=None,
-        help="Optional explicit CAN wakeup ID for bench mode (e.g. 0x260, 0x310, 0x2F2)",
+        metavar="ID",
+        help="Explicit bench wakeup CAN ID (e.g. 0x260, 0x310, 0x2F2)",
     )
-    parser.add_argument("--skip-nvs-restore", action="store_true", help="Do not restore Serial/EOL after flash")
-    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colored terminal output")
+
+    grp_adv = parser.add_argument_group("Safety & Advanced")
+    grp_adv.add_argument("-y", "--yes", action="store_true", help="Skip interactive confirmation prompt")
+    grp_adv.add_argument(
+        "--force",
+        action="store_true",
+        help="Override safety blocks (< 12.0V supply voltage or untested V2.03) — at your own risk",
+    )
+    grp_adv.add_argument("--skip-nvs-restore", action="store_true", help="Do not restore Serial/EOL after flash")
+    grp_adv.add_argument("--no-color", action="store_true", help="Disable ANSI colored terminal output")
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
     args = parser.parse_args()
 
     if args.no_color:
         C.configure(False)
 
+    if args.wifi_mode is not None:
+        mode_map = {"off": 0, "on": 1, "persist": 2}
+        mval = mode_map[args.wifi_mode]
+        flasher = CanFlasher(args.iface)
+        try:
+            flasher.unlock_security(0x35, POLY_LEVEL1, session=0x03)
+            ok = flasher.write_did(0xFD0E, bytes([mval]), timeout=2.0)
+            time.sleep(0.35)
+            st = flasher.read_did(0xFD0E, timeout=1.5)
+            if ok:
+                print(f"{C.ok('[OK]')} Wi-Fi SoftAP mode set to '{args.wifi_mode}' ({mval}).")
+            else:
+                print(f"{C.err('[FAIL]')} Wi-Fi SoftAP request rejected (thermal/undervoltage lockout or unsupported).")
+            if st and len(st) >= 4:
+                print(
+                    f"     0xFD0E Status: running={st[0]}, persistent={st[1]}, "
+                    f"guard_flags=0x{st[2]:02X}, idle_rem_min={st[3]}"
+                )
+            sys.exit(0 if ok else 1)
+        finally:
+            flasher.close()
+
     img = args.file_opt or args.image
     if not args.check_only and not img:
-        parser.error("Please provide a firmware .bin file (positional or via --file), or use --check-only.")
+        parser.error("Please provide a firmware .bin file, or use --info / --wifi-mode.")
 
     flash_firmware(
         img,
