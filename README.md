@@ -38,6 +38,7 @@ It maintains full protocol compatibility with existing BLE service `0xE550` apps
 ## Table of Contents
 
 - [Why FaReFlash? (Comparison & Advantages)](#why-fareflash-comparison--advantages)
+- [Feature List & How It Is Implemented](#feature-list--how-it-is-implemented)
 - [Key Features](#key-features)
 - [Supported Hardware & Vehicle Profiles](#supported-hardware--vehicle-profiles)
 - [How to Install FaReFlash on Your Module](#how-to-install-fareflash-on-your-module)
@@ -64,12 +65,34 @@ The OEM gateway hardware is built around an **Espressif ESP32-C3-MINI-1** (160 M
 | **Profile 1 (`XMF`/`XEF 125`) Gear, Load & Odometer** | ⚠️ Partial (`0xFF` / `0xFFFFFFFF`) | ✅ Fully populated |
 | **OBD-II Mode `0x01` Live Sensors (MAP, IAT, Timing)** | ❌ Not supported | ✅ Polled & streamed (`0xEE20`–`0xEE24`) |
 | **Gateway Health & Chip Temperature Monitoring** | ❌ CAN heartbeat only | ✅ Exposed via BLE (`0xEE11`) & Web UI |
+| **Gateway 12-bit ADC Supply Voltage (`0x6F0`)** | ✅ CAN heartbeat only | ✅ 100% `0x6F0` parity + Web UI + `< 12.0 V` CAN flasher stop |
+| **Autonomous Blackbox (Freeze-Frames, Battery & Engine Stats)** | ❌ Not available | ✅ 8-slot Freeze-Frames, Cranking/Charging check & lifetime stats (`0xEE12`/`0xEE13`) |
 | **Built-in Wi-Fi SoftAP & Browser Cockpit** | ❌ Wi-Fi unused | ✅ Local Web UI (`192.168.4.1` / `fareflash.local`) |
+| **On-Demand Wi-Fi with Thermal & Brownout Guard** | ❌ Not applicable | ✅ Default OFF, 13 dBm cap, 62/68 °C & 11.2 V guard, 10-min auto-off (`0xFD0E`) |
 | **Live CAN Monitor, Trace & Interactive Bit-Finder** | ❌ Not available | ✅ Built into Web UI (`.csv` / `.log` export) |
-| **End-User OTA Updates (Web)** | ❌ CAN-bus only | ✅ Web-OTA via browser |
+| **Wireless CAN-over-Wi-Fi Bridge (`SavvyCAN / GVRET`)** | ❌ Not available | ✅ TCP Port 23 (`🔌 Bridge` tab), Read-Only default + optional TX toggle |
+| **End-User OTA Updates (Web & BLE)** | ❌ CAN-bus only | ✅ Web-OTA via browser (~4 s) & BLE-OTA |
 | **ISO-TP / UDS Bounds Checking** | ⚠️ Limited FF length validation | ✅ Strict length & bounds checks |
 | **Selective-Wake Power-Off** | ✅ Supported | ✅ Supported + active-BLE sleep guard |
 | **NVS Backup & Restore (`nvs_es`)** | ❌ Not available | ✅ 1-click download/restore in Web UI |
+
+---
+
+## Feature List & How It Is Implemented
+
+Below is a technical overview of all core FaReFlash features and how they are engineered inside the ESP-IDF firmware (100% clean-room implementation on ESP32-C3):
+
+| Feature | How It Is Implemented |
+| :--- | :--- |
+| **1. OEM-Compatible BLE Gateway (`0xE550`)** | Built on Espressif Bluedroid GATT Server exposing characteristics `0xE5C0`–`0xE5C4`, CRC-8 OpenSafety (`0x2F`) framing, CRC-16/MODBUS Security Access (`0x27`), dynamic C3 telemetry (`0xFD10`) and C4 DTC streaming (`0xFD11`), plus shortened 2.0 s link supervision timeout for instant reconnect after app restarts. |
+| **2. Autonomous Blackbox (`0xEE12` / `0xEE13`)** | Runs at 5 Hz inside the gateway heartbeat loop. **Cranking & Charging Analyzer** detects starter voltage drops (`< 11.4 V` while engine starts), measures minimum cranking voltage, and tracks alternator charging voltage above 2,500 RPM (`OK / Weak / Low`). **Lifetime Engine Stats** accumulate engine run time, cold starts, peak RPM, and max coolant temp purely in RAM and flush to NVS only on sleep/shutdown or every 30 min of engine operation. **Freeze-Frame Ring** captures an 8-slot snapshot (RPM, speed, coolant, TPS, gear, `Ubatt`, chip temp, odometer, timestamp) on every newly appearing ECU DTC (`0x59 0x02`) or critical event (over-temp / brownout). Strictly stored in ESP-IDF's default `nvs` partition (`"blackbox"` namespace) — OEM `nvs_es` is never touched — with deduplication (existing DTC updates counter/timestamp in place), 60 s cooldown, and max 5 flash commits per ignition cycle to protect flash endurance. |
+| **3. Wireless CAN-Bridge (`SavvyCAN / GVRET`)** | Optional TCP server on **Port 23** implementing the binary **GVRET** protocol (`0xE7` / `0xF1`). Disabled by default (`0 B` RAM/CPU overhead). When enabled in the Web Cockpit's **`🔌 Bridge`** tab, a dedicated FreeRTOS task and 64-frame non-blocking ring queue stream live TWAI frames to desktop tools like **SavvyCAN**. Starts **Read-Only** by default; CAN transmission requires an explicit expert toggle (auto-resets to Read-Only on disconnect/disable). Auto-stops when Wi-Fi shuts down or after 10 minutes without a TCP client. |
+| **4. On-Demand Wi-Fi SoftAP + Thermal & Brownout Guard (`0xFD0E`)** | SoftAP is **OFF by default at boot** to keep heat and current draw minimal in the potted housing. Activated on demand from **Fantic Analyzer** (`0x2E 0xFD0E 0x01`) or CAN (`--wifi-mode on`) with a 10-minute inactivity auto-off timer. A 1 Hz supervisor caps TX power to **13.0 dBm**, throttles to **8.5 dBm** at `≥ 62 °C`, and shuts down Wi-Fi with lockout (`NRC 0x22`) at `≥ 68 °C` (`76 °C` during active Web-OTA; release `≤ 60 °C`) or when OEM `GPIO0` ADC `Ubatt < 11.2 V` for `≥ 2 s` (release `≥ 11.8 V`). |
+| **5. Browser Diagnostic Cockpit & Bit-Finder** | Embedded single-page HTML/JS app served via `esp_http_server` with mDNS + UDP DNS fallback (`http://fareflash.local` / `192.168.4.1`) in 4 languages (`DE / EN / FR / ES`). The **CAN Monitor** feeds a lock-free ring buffer polled by the browser; Matrix, Trace (50k frames), `.csv`/`.log` export, and the **SavvyCAN-style `🔍 Bit-Finder`** (3-second baseline noise masking) execute entirely client-side in JavaScript for zero extra MCU load. |
+| **6. Extended OBD-II Mode `0x01` Telemetry (`0xEE20`–`0xEE24`)** | A lightweight round-robin poller queries standard OBD-II PIDs (`0x0B` MAP, `0x0D` Speed, `0x0E` Timing Advance, `0x0F` IAT, `0x04`/`0x05`/`0x0C`/`0x11`/`0x42`) on `0x7DF → 0x7E8` at low bus load, caching values with a valid-PID bitmask (`0xEE20`) that can be subscribed directly inside the existing `0xE5C3` BLE live stream. |
+| **7. Gateway Health, ADC Voltage & Internal DTCs (`0x6F0` / `0xEE11`)** | Samples the ESP32-C3 internal temperature sensor and the OEM voltage divider on `ADC1_CH0` (`GPIO0`, 12-bit curve-fitting calibration) to populate the 200 ms `0x6F0` CAN heartbeat (`5 mV/LSB`) and expose chip temperature, peak temperature, and all 6 OEM NVS DTC slots via `0xEE11` and Web UI. |
+| **8. Dual-Slot OTA (Web, BLE & CAN) + Safety Guards** | Supports firmware updates over **HTTP Web-OTA** (~4 s), **BLE-OTA** (non-blocking `OTA_WITH_SEQUENTIAL_WRITES` erase so BLE never drops), and **CAN UDS** (`0x780 → 0x785`). Validates the ESP32-C3 image header before touching flash, preserves `nvs_es` (serial & calibration), and `fantic_can_flasher.py` aborts CAN flashing below **`12.0 V`** supply voltage (`0x6F0`). |
+| **9. Hardened CAN/ISO-TP & Selective-Wake Sleep Guard** | Enforces strict ISO 15765-2 frame length/bounds checks and ISO 14229-1 functional NRC suppression on `0x7DF`. Drives the **TI TCAN1146** SBC over SPI2 for selective-wake power-off (`0xFD07 = 1`) after 10 s of CAN silence while inhibiting shutdown whenever a BLE client is actively connected. |
 
 ---
 
@@ -88,7 +111,8 @@ The OEM gateway hardware is built around an **Espressif ESP32-C3-MINI-1** (160 M
   * **Matrix Mode:** Real-time per-ID view with byte-change highlighting and cycle time (`Δt ms`).
   * **Trace Mode:** Chronological raw CAN frame log (up to 50,000 frames in browser memory) with ID filtering (`310, 500, 780-7DF, !6F0`) and export to SavvyCAN `.csv` or `candump .log`.
   * **Interactive `🔍 Bit-Finder` (SavvyCAN-style):** Runs 100% in your browser (zero extra load on the module). Click **Baseline (3s)** hands-off to automatically mask noisy bits (alive counters, CRCs, RPM jitter), then operate any lever or switch (clutch, brake, gear, turn signal) to highlight the exact changing byte and bit (`0→1` green, `1→0` red, toggled yellow) in real time.
-* **Firmware & Config Tabs:** Dual-slot Web-OTA updater with binary header validation, NVS backup/restore, vehicle profile selection, Wi-Fi SSID/password customization, and an option to disable the Wi-Fi SoftAP when you only need Bluetooth.
+* **Firmware & Config Tabs:** Dual-slot Web-OTA updater with binary header validation, NVS backup/restore, vehicle profile selection, and Wi-Fi SSID/password customization.
+* **On-Demand Wi-Fi with Thermal & Brownout Protection:** To keep the sealed OEM module cool and prevent voltage-regulator brownouts, the Wi-Fi SoftAP is **OFF by default** at boot and activated on demand from **Fantic Analyzer** (Module card switch via `0xFD0E`) or over CAN (`--wifi-mode on`), with a 10-minute inactivity auto-off timer. TX power is capped at **13 dBm** (`8.5 dBm` thermal derating at `≥ 62 °C`), with automatic cutoff at **`≥ 68 °C`** (cooldown to `≤ 60 °C`; `76 °C` emergency cutoff during active Web-OTA) and undervoltage protection below **`11.2 V`** (release at `≥ 11.8 V`).
 
 ### 3. Hardened CAN/ISO-TP Stack & Smart Power Management
 * Strict ISO 15765-2 length and bounds checking prevents memory corruption or unexpected reboots on malformed bus traffic.
@@ -100,7 +124,7 @@ The OEM gateway hardware is built around an **Espressif ESP32-C3-MINI-1** (160 M
 ## Supported Hardware & Vehicle Profiles
 
 ### Hardware
-* **Module:** `e-Conn Micro Fantic` (Part No. `30513` / `V1391005`), Hardware RevC (`CUM`), 4-pin JST connector (`+12V`, `GND`, `CAN_H`, `CAN_L`).
+* **Module:** `e-Conn Micro Fantic` (Part No. `30513` / `V1391005`), Hardware RevC (`CUM`), unknown 4-pin waterproof JST-style connector with slotted sides (`+12V`, `GND`, `CAN_H`, `CAN_L`).
 * **Stock Firmware Requirement:** **Verified on `V1.1` only.** Modules with **`V2.03`** are untested and may be protected (needs investigation).
 
 ### Vehicle Profiles (`DID 0x0001` / `0xFD03`)
@@ -135,18 +159,15 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
 
 #### Required Hardware
 * A Linux PC with a SocketCAN USB-to-CAN adapter — tested and recommended: **DSD TECH SH-C31A USB-to-CAN Adapter** (`gs_usb` driver built into Linux, integrated switchable `120 Ω` bus termination).
-* **Connection Option A (Strongly Recommended — In-Vehicle via 6-Pin OBD, No Module Removal):**
-  * Connect directly to the motorcycle's **red 6-pin Euro 5 / Euro 5+ OBD diagnostic connector (ISO 19689)** using a simple 6-pin motorcycle OBD adapter (`CAN_H`, `CAN_L`, `GND`). Because the gateway module sits on the same 500 kbit/s CAN bus as the diagnostic port, **you do not need to remove the module from the bike** — and because the motorcycle's ECUs keep the CAN bus continuously active, **in-vehicle flashing is significantly more reliable and straightforward than bench flashing**.
-  * Turn **Ignition ON, Engine OFF** (ensure a healthy battery ≥ 12.2 V or connect a battery charger; disconnect any BLE apps or other OBD scanners).
+* **In-Vehicle Connection via 6-Pin Euro 5 OBD (Only Safe & Recommended Method — No Module Removal):**
+  * Connect directly to the motorcycle's **red 6-pin Euro 5 / Euro 5+ OBD diagnostic connector (ISO 19689)** using a simple 6-pin motorcycle OBD adapter (`CAN_H`, `CAN_L`, `GND`). Because the gateway module sits on the same 500 kbit/s CAN bus as the diagnostic port, **you do not need to remove the module from the bike** — and the motorcycle's ECUs keep the CAN bus continuously awake throughout the flash.
+  * Turn **Ignition ON, Engine OFF** and **connect a 12 V battery charger** (the flasher enforces a **≥ 12.0 V** supply-voltage safety check via `0x6F0`; disconnect any BLE apps or other OBD scanners).
   * Set the **`120 Ω` termination switch on the DSD TECH SH-C31A to `OFF`** (the motorcycle wiring harness is already terminated).
-* **Connection Option B (Bench / Removed Module — Advanced / Less Reliable):**
-  * Connect a stable 12 V power supply and CAN lines directly to the module's 4-pin JST connector (`+12V`, `GND`, `CAN_H`, `CAN_L`).
-  * Set the **`120 Ω` termination switch on the DSD TECH SH-C31A to `ON`**.
-  * *Note on bench stability:* Without the motorcycle wiring harness (active ECU traffic), waking a sleeping module is noticeably more sensitive and may occasionally abort mid-transfer (requiring a retry). Whenever possible, **prefer Option A (in-vehicle via the 6-pin OBD port)**. If you must flash on the bench, **power-cycle 12 V and start the flasher within the first 10 seconds** so the module never enters sleep mode in the first place (otherwise, the script will attempt to wake it automatically via a 3-frame burst on `0x260`/`0x310`/`0x2F2` and send keep-alive frames).
+* **Why Bench Flashing Is Not Practical / Not Recommended:**
+  * The OEM module uses an **unknown 4-pin waterproof JST-style connector with slotted sides** (standard `JST 04R-JWPF-VSLE` plugs do **not** fit). Poking loose DuPont jumper wires directly into the tightly spaced pins carries a high risk of short-circuiting `+12V` to `GND` or `CAN` — **always flash cleanly in-vehicle via the 6-pin OBD diagnostic connector**.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/7741d89c-71eb-499a-b15b-91a4f59c0c4c" alt="JST 04R-JWPF-VSLE cable harness" width="250">
-  <img src="https://github.com/user-attachments/assets/1e9f823f-3e8e-4eb1-bab5-6fd89ecaaa8a" alt="EURO5 to SH-C31A cable harness" width="250">
+  <img src="https://github.com/user-attachments/assets/1e9f823f-3e8e-4eb1-bab5-6fd89ecaaa8a" alt="EURO5 to SH-C31A cable harness" width="300">
 </p>
 
 #### Steps
@@ -155,13 +176,13 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
    sudo ip link set can0 down
    sudo ip link set can0 up type can bitrate 500000
    ```
-2. *(Recommended first)* Run a **non-destructive pre-flight check** to verify your connection, wake the module if needed, and inspect its firmware version & profile without modifying flash:
+2. *(Recommended first)* Run a **non-destructive pre-flight check** to verify your connection, supply voltage (`Ubatt`), firmware version, and vehicle profile without modifying flash:
    ```bash
-   python3 fantic_can_flasher.py --iface can0 --check-only
+   python3 fantic_can_flasher.py --iface can0 --info
    ```
 3. Run the Python CAN flasher with the pre-built FaReFlash `.bin` file:
    ```bash
-   python3 fantic_can_flasher.py --iface can0 --file FaReFlash_v.0.0.50-alpha.bin
+   python3 fantic_can_flasher.py --iface can0 FaReFlash_v.0.0.56-alpha.bin
    ```
 4. **Automated Safe Flash Workflow:** The script automatically handles every step:
    * **Bus & Wakeup Detection:** Passively checks whether the module is connected to a live motorcycle harness (with active ECU wakeup PIDs such as `0x260`/`0x310`/`0x2F2`). On a bench setup without ECU traffic, it automatically starts a background wakeup/keep-alive sender so the module stays awake throughout the entire flash.
@@ -234,9 +255,12 @@ All standard OEM DIDs (`0x0001`–`0x002C`, `0xE501`–`0xE506`) remain unchange
 
 | DID | Size | Access | Description |
 | :--- | :---: | :---: | :--- |
+| **`0xFD0E`** | 4 B / 1 B | Read (`0x22`) / Write (`0x2E`) | On-Demand Wi-Fi SoftAP Control & Thermal/Brownout Guard (`[running, persistent, guard_flags, idle_rem_min]`; Write `0=OFF`, `1=On-Demand`, `2=Persistent`) |
 | **`0xEE01`** | Variable | Read (`0x22`) | FaReFlash Identity & Version string |
 | **`0xEE10`** | Variable | Read (`0x22`) | Wi-Fi SoftAP status & active SSID |
 | **`0xEE11`** | 37 B | Read (`0x22`) / Clear (`0x31 0x01 0xEE11`) | Gateway Health: Chip Temp (`0.1 °C`), Peak Temp (`0.1 °C`), Temp Status, 6 × 5-byte internal NVS DTC slots |
+| **`0xEE12`** | 32 B | Read (`0x22`) | Autonomous Blackbox Stats: Ignition cycles, engine run seconds, cold starts, peak RPM, max coolant temp, last/min cranking voltage (`mV`), avg/max charging voltage (`mV`), battery & charging health flags, unseen Freeze-Frame count |
+| **`0xEE13`** | `1 + N×22 B` | Read (`0x22`) / Routine (`0x31 0x01 0xEE13`) | Autonomous Blackbox Freeze-Frame Ring (up to 8 deduplicated snapshots: trigger type, source, 3-byte DTC, occurrence count, RPM, speed, coolant, TPS, gear, `Ubatt`, chip temp, odometer, uptime). Routine `opt=0x01` marks unseen as read; `opt=0xFF` clears ring |
 | **`0xEE20`** | 2 B | Read / Stream (`0xE5C3`) | OBD-II Mode `0x01` Valid-PID Bitmask |
 | **`0xEE21`** | 1 B | Read / Stream (`0xE5C3`) | OBD-II Manifold Absolute Pressure (MAP, `kPa`) |
 | **`0xEE22`** | 1 B | Read / Stream (`0xE5C3`) | OBD-II Vehicle Speed (`km/h`) |
