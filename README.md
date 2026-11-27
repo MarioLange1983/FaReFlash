@@ -168,6 +168,7 @@ The module's stock `V1.1` firmware supports physical CAN-bus UDS flashing on `0x
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/1e9f823f-3e8e-4eb1-bab5-6fd89ecaaa8a" alt="EURO5 to SH-C31A cable harness" width="300">
+  <img src="https://github.com/user-attachments/assets/c3e9aa55-792b-4349-adf5-6817ce8c2b17" alt="EURO5 to SH-C31A cable harness in use" width="300">
 </p>
 
 #### Steps
